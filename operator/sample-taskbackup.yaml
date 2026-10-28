@@ -1,0 +1,11 @@
+# A Custom Resource: one request for one backup. Every omitted field is
+# defaulted by the CRD schema (host db-0.db-headless, database taskdb, ...).
+apiVersion: dso202.cst.edu.bt/v1alpha1
+kind: TaskBackup
+metadata:
+  name: nightly-001
+  namespace: dso202-assignment-02
+spec:
+  database:
+    host: db-0.db-headless
+    name: taskdb

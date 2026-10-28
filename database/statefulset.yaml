@@ -1,0 +1,117 @@
+# 2.1 — database tier as a StatefulSet (Assignment 1 used Deployment + PVC).
+#
+# replicas: 1 is deliberate. A StatefulSet gives db-0 a stable name, DNS
+# record and PVC; it does NOT make the stock postgres image replicate. Scaling
+# to 3 would create three independent, empty databases. Real replication
+# needs PostgreSQL-aware startup logic or a database Operator (2.4).
+apiVersion: v1
+kind: Service
+metadata:
+  name: db-headless
+  namespace: dso202-assignment-02
+  labels:
+    app: task-tracker
+    tier: database
+spec:
+  clusterIP: None                  # headless: DNS returns Pod IPs, and db-0.db-headless exists
+  publishNotReadyAddresses: false
+  selector:
+    app: task-tracker
+    tier: database
+  ports:
+    - name: tcp-postgres           # "tcp-" prefix tells Istio this is opaque TCP, not HTTP (2.5)
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+  namespace: dso202-assignment-02
+  labels:
+    app: task-tracker
+    tier: database
+spec:
+  serviceName: db-headless         # must name the headless Service above
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: task-tracker
+      tier: database
+  template:
+    metadata:
+      labels:
+        app: task-tracker
+        tier: database
+        version: v1
+    spec:
+      serviceAccountName: db-sa
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: db
+          image: sarojsanyasi/dso202-db:1.0     # Assignment 1 image: postgres + 01-init.sql schema
+          ports:
+            - name: tcp-postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: task-tracker-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: task-tracker-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: task-tracker-secret
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA                      # subdirectory: volume root may contain lost+found
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -h 127.0.0.1"]
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -h 127.0.0.1"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0                 # raise to N to hold ordinals < N on the old revision (canary)
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain            # deleting the StatefulSet never deletes data-db-0
+    whenScaled: Retain
+  volumeClaimTemplates:            # one PVC per ordinal: data-db-0, data-db-1, ...
+    - metadata:
+        name: data
+        labels:
+          app: task-tracker
+          tier: database
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard  # kind's local-path provisioner (WaitForFirstConsumer)
+        resources:
+          requests:
+            storage: 1Gi

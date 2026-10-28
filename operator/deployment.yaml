@@ -1,0 +1,53 @@
+# 2.4 — the Operator: a controller running a reconciliation loop over TaskBackup objects.
+# Image is built locally and loaded into kind:  make operator-image
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskbackup-operator
+  namespace: taskbackup-operator
+  labels:
+    app: taskbackup-operator
+spec:
+  replicas: 1                      # kopf runs --standalone (no peering), so exactly one controller
+  strategy:
+    type: Recreate                 # never let two controllers reconcile the same objects at once
+  selector:
+    matchLabels:
+      app: taskbackup-operator
+  template:
+    metadata:
+      labels:
+        app: taskbackup-operator
+    spec:
+      serviceAccountName: taskbackup-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: dso202/taskbackup-operator:0.1.2
+          imagePullPolicy: IfNotPresent
+          args: ["--namespace=dso202-assignment-02"]
+          ports:
+            - name: health
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 192Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: task-tracker-config
+  namespace: dso202-assignment-02
+data:
+  # --- backend ---
+  # Stable per-Pod DNS name from the StatefulSet + headless Service (2.1):
+  # <pod>.<headless-svc>  ->  always the Pod in ordinal slot 0, across restarts.
+  DB_HOST: "db-0.db-headless"
+  DB_PORT: "5432"
+  DB_NAME: "taskdb"
+  APP_PORT: "8080"
+  # Browser only ever talks to the Ingress host, so CORS is pinned to it
+  # instead of Assignment 1's "*".
+  CORS_ORIGIN: "https://tasktracker.local"
+  # --- database (official postgres image reads POSTGRES_*) ---
+  POSTGRES_DB: "taskdb"
+  # --- frontend ---
+  # Same-origin path baked into config.js. In Assignment 1 the frontend's own
+  # nginx proxied /backend/*; here the Ingress routes /backend/* straight to
+  # backend-svc (2.2), so the frontend runs its stock image config.
+  BACKEND_URL: "/backend"

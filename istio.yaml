@@ -1,0 +1,187 @@
+# 2.5 — Service mesh policy. Requires Istio installed and the namespace label
+# istio-injection=enabled (namespace.yaml). Without istiod these objects are inert.
+
+# Security: every workload in the namespace accepts only mutual-TLS traffic.
+# A Pod without a sidecar (no mesh certificate) is rejected at the connection.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: dso202-assignment-02
+spec:
+  mtls:
+    mode: STRICT
+---
+# DestinationRule = HOW to talk to a destination once chosen:
+# subsets, mTLS, connection limits, outlier detection (passive circuit breaking).
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: backend
+  namespace: dso202-assignment-02
+spec:
+  host: backend-svc.dso202-assignment-02.svc.cluster.local
+  subsets:
+    - name: v1
+      labels:
+        version: v1
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      tcp:
+        maxConnections: 100
+        connectTimeout: 2s
+      http:
+        http1MaxPendingRequests: 50
+        maxRequestsPerConnection: 100
+    outlierDetection:              # eject a Pod after 3 consecutive 5xx, for 30s
+      consecutive5xxErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: frontend
+  namespace: dso202-assignment-02
+spec:
+  host: frontend-svc.dso202-assignment-02.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    outlierDetection:
+      consecutive5xxErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+---
+# VirtualService = WHERE a request goes and with what resiliency.
+# Reads (GET) are idempotent, so they retry on 5xx; writes retry only when the
+# request provably never reached the app (connect-failure / refused-stream),
+# so a POST is never duplicated.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: backend
+  namespace: dso202-assignment-02
+spec:
+  hosts:
+    - backend-svc.dso202-assignment-02.svc.cluster.local
+  http:
+    - name: reads
+      match:
+        - method:
+            exact: GET
+      route:
+        - destination:
+            host: backend-svc.dso202-assignment-02.svc.cluster.local
+            subset: v1
+      timeout: 6s
+      retries:
+        attempts: 3
+        perTryTimeout: 2s
+        retryOn: 5xx,reset,connect-failure,refused-stream
+    - name: writes
+      route:
+        - destination:
+            host: backend-svc.dso202-assignment-02.svc.cluster.local
+            subset: v1
+      timeout: 6s
+      retries:
+        attempts: 2
+        perTryTimeout: 3s
+        retryOn: connect-failure,refused-stream
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: frontend
+  namespace: dso202-assignment-02
+spec:
+  hosts:
+    - frontend-svc.dso202-assignment-02.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: frontend-svc.dso202-assignment-02.svc.cluster.local
+      timeout: 5s
+      retries:
+        attempts: 2
+        perTryTimeout: 2s
+        retryOn: 5xx,reset,connect-failure
+---
+# ---------- Authorization (zero trust inside the namespace) ----------
+# mTLS proves WHO is calling (SPIFFE identity from the ServiceAccount);
+# AuthorizationPolicy decides WHETHER that identity may make this call.
+# An empty spec matches every workload and allows nothing: default deny.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: dso202-assignment-02
+spec: {}
+---
+# Frontend: only the ingress controller, only GET/HEAD.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: frontend-allow-ingress
+  namespace: dso202-assignment-02
+spec:
+  selector:
+    matchLabels:
+      tier: frontend
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/ingress-nginx/sa/ingress-nginx"]
+      to:
+        - operation:
+            methods: ["GET", "HEAD"]
+            ports: ["8080"]
+---
+# Backend: only the ingress controller, only the real API paths.
+# The frontend Pod itself may NOT call the backend (browser -> Ingress does).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: backend-allow-ingress
+  namespace: dso202-assignment-02
+spec:
+  selector:
+    matchLabels:
+      tier: backend
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/ingress-nginx/sa/ingress-nginx"]
+      to:
+        - operation:
+            methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+            paths: ["/api/tasks", "/api/tasks/*", "/api/status"]
+            ports: ["8080"]
+---
+# Database: only the backend and the Operator's backup Jobs (L4, port 5432).
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: db-allow-backend-and-backups
+  namespace: dso202-assignment-02
+spec:
+  selector:
+    matchLabels:
+      tier: database
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/dso202-assignment-02/sa/backend-sa
+              - cluster.local/ns/dso202-assignment-02/sa/taskbackup-runner
+      to:
+        - operation:
+            ports: ["5432"]

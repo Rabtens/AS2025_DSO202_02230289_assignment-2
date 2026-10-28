@@ -1,0 +1,15 @@
+# 2.2 + 2.5 — put the ingress controller in the mesh so its traffic to the
+# STRICT-mTLS namespace is encrypted with a mesh identity.
+#   kubectl patch deployment ingress-nginx-controller -n ingress-nginx --patch-file ingress-nginx-istio-patch.yaml
+spec:
+  template:
+    metadata:
+      labels:
+        sidecar.istio.io/inject: "true"
+      annotations:
+        # Only intercept outbound traffic; client traffic to nginx stays untouched.
+        traffic.sidecar.istio.io/includeInboundPorts: ""
+        # Admission webhook port must stay reachable by the API server.
+        traffic.sidecar.istio.io/excludeInboundPorts: "8443"
+        # Talk to the API server directly (kubernetes Service ClusterIP on kind).
+        traffic.sidecar.istio.io/excludeOutboundIPRanges: "10.96.0.1/32"

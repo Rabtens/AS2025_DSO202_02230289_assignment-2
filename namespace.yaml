@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dso202-assignment-02
+  labels:
+    course: dso202
+    assignment: "2"
+    # 2.5 — istiod's mutating webhook injects an Envoy sidecar into every Pod
+    # created here. Harmless (ignored) on a cluster without Istio.
+    istio-injection: enabled

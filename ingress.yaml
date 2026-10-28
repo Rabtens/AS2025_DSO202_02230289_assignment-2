@@ -1,0 +1,71 @@
+# 2.2 — one entry point, name-based host + path routing, TLS terminated at the controller.
+#
+#   https://tasktracker.local/            -> frontend-svc:8080
+#   https://tasktracker.local/backend/... -> backend-svc:8080/...   (prefix stripped)
+#
+# Two Ingress objects because the backend rule needs rewrite/regex annotations
+# that must NOT apply to the frontend (annotations are per-object).
+# TLS secret: `make tls` (self-signed, CN/SAN tasktracker.local).
+#
+# service-upstream + upstream-vhost: send traffic to the Service ClusterIP with
+# the Service's Host header rather than directly to Pod IPs, so the ingress
+# controller's own Istio sidecar applies mTLS and the VirtualService rules (2.5).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: task-tracker-frontend
+  namespace: dso202-assignment-02
+  labels:
+    app: task-tracker
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/service-upstream: "true"
+    nginx.ingress.kubernetes.io/upstream-vhost: frontend-svc.dso202-assignment-02.svc.cluster.local
+spec:
+  ingressClassName: nginx          # not the deprecated kubernetes.io/ingress.class annotation
+  tls:
+    - hosts: [tasktracker.local]
+      secretName: tasktracker-tls
+  rules:
+    - host: tasktracker.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-svc
+                port:
+                  name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: task-tracker-backend
+  namespace: dso202-assignment-02
+  labels:
+    app: task-tracker
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2    # /backend/api/tasks -> /api/tasks
+    nginx.ingress.kubernetes.io/limit-rps: "20"        # per-client-IP rate limit on the API only
+    nginx.ingress.kubernetes.io/service-upstream: "true"
+    nginx.ingress.kubernetes.io/upstream-vhost: backend-svc.dso202-assignment-02.svc.cluster.local
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [tasktracker.local]
+      secretName: tasktracker-tls
+  rules:
+    - host: tasktracker.local
+      http:
+        paths:
+          # Regex path needs ImplementationSpecific: controller-specific, not portable.
+          - path: /backend(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: backend-svc
+                port:
+                  name: http

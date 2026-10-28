@@ -1,0 +1,165 @@
+# 2.3 — RBAC. Default is deny; every grant below is the minimum for one persona.
+#
+#   Subject                         Kind            Binding -> Role                  Scope
+#   backend-sa / frontend-sa / db-sa ServiceAccount (none)                           no API access at all
+#   taskbackup-runner               ServiceAccount  (none)                           mesh identity for backup Jobs only
+#   ci-deployer                     ServiceAccount  task-tracker-ci-deployer         roll out named workloads only
+#   group dso202-developers         Group           task-tracker-developer           debug + scale, no Secrets
+#   auditor@cst.edu.bt              User            ClusterRole/view (via RoleBinding) read-only, this namespace only
+#
+# The operator's own identity is in operator/rbac.yaml.
+
+# ---------- workload identities ----------
+# One ServiceAccount per tier so each has a distinct identity (Istio also uses
+# it as the mTLS SPIFFE identity). None of the apps call the Kubernetes API, so
+# no token is mounted and nothing is bound.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backend-sa
+  namespace: dso202-assignment-02
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frontend-sa
+  namespace: dso202-assignment-02
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: db-sa
+  namespace: dso202-assignment-02
+automountServiceAccountToken: false
+---
+# Identity of the pg_dump Jobs created by the TaskBackup Operator (2.4). No RBAC
+# bindings: it exists only so istio.yaml can allow it (and backend-sa) to reach
+# the database over mTLS while everything else is denied.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: taskbackup-runner
+  namespace: dso202-assignment-02
+automountServiceAccountToken: false
+---
+# ---------- CI/CD pipeline ----------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-deployer
+  namespace: dso202-assignment-02
+automountServiceAccountToken: false   # token issued on demand: kubectl create token ci-deployer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: task-tracker-ci-deployer
+  namespace: dso202-assignment-02
+rules:
+  # Change image/spec of the three named workloads only — resourceNames pins it.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["backend", "frontend"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    resourceNames: ["db"]
+    verbs: ["get", "patch", "update"]
+  # list/watch cannot be restricted by resourceNames, so they get their own rule
+  # (needed by `kubectl rollout status`).
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["task-tracker-config"]
+    verbs: ["get", "patch", "update"]
+  # Deliberately absent: create/delete on anything, Secrets, RBAC objects, other namespaces.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: task-tracker-ci-deployer
+  namespace: dso202-assignment-02
+subjects:
+  - kind: ServiceAccount
+    name: ci-deployer
+    namespace: dso202-assignment-02
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: task-tracker-ci-deployer
+---
+# ---------- human developers ----------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: task-tracker-developer
+  namespace: dso202-assignment-02
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "endpoints", "configmaps",
+                "persistentvolumeclaims", "events", "serviceaccounts"]
+    verbs: ["get", "list", "watch"]
+  # Debugging: exec and port-forward are subresources with the "create" verb.
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets", "controllerrevisions"]
+    verbs: ["get", "list", "watch"]
+  # patch (not update) on the parent object is what `kubectl rollout restart`
+  # and `kubectl patch ... partition` send.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.istio.io", "security.istio.io"]
+    resources: ["virtualservices", "destinationrules", "peerauthentications", "authorizationpolicies"]
+    verbs: ["get", "list", "watch"]
+  # Self-service backups through the Operator's API (2.4) — no direct Job access needed.
+  - apiGroups: ["dso202.cst.edu.bt"]
+    resources: ["taskbackups"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Deliberately absent: secrets (any verb), delete on workloads, RBAC objects.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: task-tracker-developers
+  namespace: dso202-assignment-02
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: dso202-developers
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: task-tracker-developer
+---
+# ---------- auditors ----------
+# Reuses the built-in "view" ClusterRole, but a RoleBinding scopes it to this
+# namespace only. "view" already excludes Secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: task-tracker-auditors
+  namespace: dso202-assignment-02
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: auditor@cst.edu.bt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
